@@ -13,13 +13,15 @@ import (
 	"github.com/modermatt44/portal/internal/term"
 )
 
-// printReport writes a human-readable detection report to w.
+// printReport writes a human-readable detection report to w. client is the
+// command portal would run, if any.
 func printReport(w io.Writer, s term.Style, rep *detect.Report, client string) {
+	var fields [][2]string
 	best, ok := rep.Best()
 	switch {
 	case ok:
 		fmt.Fprintf(w, "%s %s on %s %s\n", s.Green("✓"), s.Bold(best.Label()), rep.Target, s.Dim("("+best.Confidence.String()+")"))
-		printFields(w, s, resultFields(best, rep))
+		fields = resultFields(best, rep)
 	case len(rep.Candidates) > 0:
 		fmt.Fprintf(w, "%s Several services could be on %s:\n", s.Yellow("?"), rep.Target)
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -27,19 +29,18 @@ func printReport(w io.Writer, s term.Style, rep *detect.Report, client string) {
 			fmt.Fprintf(tw, "  %d. %s\t%s\t%s\n", i+1, c.Label(), s.Dim(c.Confidence.String()), s.Dim(c.Evidence))
 		}
 		tw.Flush()
-		printFields(w, s, tlsFields(rep.TLS))
+		fields = tlsFields(rep.TLS)
 	default:
 		fmt.Fprintf(w, "%s No known service detected on %s\n", s.Yellow("?"), rep.Target)
-		var fields [][2]string
 		if len(rep.Banner) > 0 {
 			fields = append(fields, [2]string{"banner", quote(rep.Banner)})
 		}
 		fields = append(fields, tlsFields(rep.TLS)...)
-		printFields(w, s, fields)
 	}
 	if client != "" {
-		printFields(w, s, [][2]string{{"client", s.Cyan(client)}})
+		fields = append(fields, [2]string{"client", s.Cyan(client)})
 	}
+	printFields(w, s, fields)
 }
 
 // resultFields lists the facts about r worth showing, evidence first.

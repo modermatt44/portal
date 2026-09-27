@@ -7,15 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/modermatt44/portal/internal/clients"
+	"github.com/modermatt44/portal/internal/config"
 	"github.com/modermatt44/portal/internal/detect"
-	"github.com/modermatt44/portal/internal/rawsession"
 	"github.com/modermatt44/portal/internal/target"
 	"github.com/modermatt44/portal/internal/term"
 )
@@ -54,13 +54,20 @@ type options struct {
 	dryRun     bool
 	timeout    time.Duration
 	service    string
+	configPath string
 }
 
 type app struct {
-	opts    options
-	streams Streams
-	out     term.Style // style for Out
-	err     term.Style // style for Err
+	opts     options
+	streams  Streams
+	out      term.Style // style for Out
+	err      term.Style // style for Err
+	cfg      *config.Config
+	resolver clients.Resolver
+	// timeoutSet reports whether --timeout was given explicitly.
+	timeoutSet bool
+	// start is when the command started, for verbose timings.
+	start time.Time
 }
 
 const longHelp = `portal connects to a TCP port, figures out which service is running there,
@@ -73,10 +80,16 @@ Detection runs in this order, each step with a short timeout:
   4. fall back to the well-known port number as an unverified hint
 
 Unknown services open a raw interactive session (like nc), over TLS if the
-port speaks TLS.
+port speaks TLS. If detection is ambiguous, portal asks which service to use.
+
+Configuration (optional): ` + "`" + `%s` + "`" + `
+  [clients]                      # preferred client per service
+  postgresql = "pgcli"
+  [hosts."cache.local:6380"]     # skip detection for one endpoint
+  service = "redis"
 
 Exit codes:
-  0  success
+  0  success (or the client's own exit code once it has started)
   1  connection error (host unreachable, port closed, timeout)
   2  usage error, or no choice was made at a prompt
   3  no client program is available for the detected service
@@ -87,6 +100,7 @@ const examples = `  # Detect the service and open the matching client
   portal db.local:5432            # PostgreSQL → psql -h db.local -p 5432
   portal server:22                # SSH        → ssh -p 22 server
   portal example.com:443          # HTTPS      → curl -v https://example.com
+  portal 10.0.0.5:6379            # Redis      → redis-cli -h 10.0.0.5 -p 6379
 
   # Host and port as separate arguments, IPv6 in brackets, or a URL
   portal server 22
@@ -103,20 +117,32 @@ const examples = `  # Detect the service and open the matching client
   # Print the client command instead of running it
   portal --dry-run db.local:5432
 
+  # Skip detection when you already know the service
+  portal --service redis cache.local:6380
+
   # See which probes ran and what they saw, with a longer time limit
   portal -v --timeout 20s slow.example.com:8080`
 
 // NewRootCommand builds the portal command. version is shown by --version.
 func NewRootCommand(version string, streams Streams) *cobra.Command {
+	return newRootCommand(version, streams, clients.Resolver{})
+}
+
+func newRootCommand(version string, streams Streams, resolver clients.Resolver) *cobra.Command {
 	a := &app{
-		streams: streams,
-		out:     term.Style{Enabled: streams.OutColor},
-		err:     term.Style{Enabled: streams.ErrColor},
+		streams:  streams,
+		out:      term.Style{Enabled: streams.OutColor},
+		err:      term.Style{Enabled: streams.ErrColor},
+		resolver: resolver,
+	}
+	configHelp := config.DefaultPath()
+	if configHelp == "" {
+		configHelp = "~/.config/portal/config.toml"
 	}
 	cmd := &cobra.Command{
 		Use:     "portal <host:port | host port> [-- client args...]",
 		Short:   "Detect the service on a TCP port and open the right client",
-		Long:    longHelp,
+		Long:    fmt.Sprintf(longHelp, configHelp),
 		Example: examples,
 		Version: version,
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -128,6 +154,8 @@ func NewRootCommand(version string, streams Streams) *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			a.timeoutSet = cmd.Flags().Changed("timeout")
+			a.start = time.Now()
 			targetArgs, extra := splitArgs(args, cmd.ArgsLenAtDash())
 			return a.run(cmd.Context(), targetArgs, extra)
 		},
@@ -137,18 +165,21 @@ func NewRootCommand(version string, streams Streams) *cobra.Command {
 	cmd.SetErr(streams.Err)
 
 	f := cmd.Flags()
+	f.SortFlags = false
 	f.BoolVarP(&a.opts.detectOnly, "detect-only", "d", false,
 		"only print what was detected; don't connect a client\n(e.g. portal -d example.com:443)")
 	f.BoolVar(&a.opts.jsonOut, "json", false,
 		"print the detection result as JSON; implies --detect-only\n(e.g. portal --json db:5432 | jq .service)")
-	f.DurationVarP(&a.opts.timeout, "timeout", "t", 10*time.Second,
+	f.BoolVarP(&a.opts.dryRun, "dry-run", "n", false,
+		"print the client command instead of running it\n(e.g. portal -n db:5432 -- -U admin)")
+	f.DurationVarP(&a.opts.timeout, "timeout", "t", detect.DefaultTimeout,
 		"overall time limit for detection\n(e.g. --timeout 3s, --timeout 500ms)")
 	f.BoolVarP(&a.opts.verbose, "verbose", "v", false,
 		"show which probes ran and what they saw, on stderr\n(e.g. portal -v server:22)")
-	f.BoolVarP(&a.opts.dryRun, "dry-run", "n", false,
-		"print the client command instead of running it\n(e.g. portal -n db:5432 -- -U admin)")
 	f.StringVarP(&a.opts.service, "service", "s", "",
 		"skip detection and treat the port as this service\n(one of: "+serviceNames()+")\n(e.g. portal -s redis cache.local:6380)")
+	f.StringVar(&a.opts.configPath, "config", "",
+		"read this config file instead of the default\n(e.g. --config ./portal.toml; or set "+config.EnvPath+")")
 
 	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
 		hint := "run 'portal --help' for usage"
@@ -189,16 +220,29 @@ func (a *app) run(ctx context.Context, targetArgs, extra []string) error {
 	if a.opts.timeout <= 0 {
 		return usageError(fmt.Errorf("invalid --timeout %v", a.opts.timeout), "use a positive duration, e.g. --timeout 5s")
 	}
+	if a.opts.service != "" && a.opts.detectOnly {
+		return usageError(errors.New("--service skips detection, so it can't be combined with --detect-only"), "drop one of the two flags")
+	}
+	if err := a.loadConfig(); err != nil {
+		return err
+	}
 
+	// An explicit --service wins over the config file, which wins over
+	// detection.
 	if a.opts.service != "" {
-		if a.opts.detectOnly {
-			return usageError(errors.New("--service skips detection, so it can't be combined with --detect-only"), "drop one of the two flags")
-		}
 		choice, err := parseService(a.opts.service)
 		if err != nil {
 			return err
 		}
 		return a.handoff(ctx, t, choice, "set with --service", extra)
+	}
+	if h, ok := a.cfg.Host(t); ok && h.Service != "" && !a.opts.detectOnly {
+		choice, err := parseService(h.Service)
+		if err != nil {
+			return err
+		}
+		a.logf("config: %s is set to %s", t, h.Service)
+		return a.handoff(ctx, t, choice, "set in config", extra)
 	}
 
 	rep, err := a.detect(ctx, t)
@@ -206,11 +250,7 @@ func (a *app) run(ctx context.Context, targetArgs, extra []string) error {
 		return err
 	}
 	if a.opts.detectOnly {
-		if a.opts.jsonOut {
-			return writeJSON(a.streams.Out, rep, nil)
-		}
-		printReport(a.streams.Out, a.out, rep, "")
-		return nil
+		return a.printDetection(rep, extra)
 	}
 
 	choice, ok := rep.Best()
@@ -226,42 +266,82 @@ func (a *app) run(ctx context.Context, targetArgs, extra []string) error {
 	return a.handoff(ctx, t, choice, "detected", extra)
 }
 
-// handoff connects the user to the chosen service. how says how the
-// service was determined, e.g. "detected".
-func (a *app) handoff(ctx context.Context, t target.Target, choice detect.Result, how string, extra []string) error {
-	if choice.Service == detect.Unknown {
-		a.status("?", fmt.Sprintf("No known service on %s → opening a %s", t, rawLabel(choice.TLS != nil)))
-		return a.rawSession(ctx, t, choice.TLS != nil, false)
+// loadConfig reads the config file named by --config, or the default one
+// if it exists.
+func (a *app) loadConfig() error {
+	path, explicit := a.opts.configPath, a.opts.configPath != ""
+	if !explicit {
+		path = config.DefaultPath()
 	}
-	a.status("✓", fmt.Sprintf("%s %s on %s → opening a %s", choice.Label(), how, t, rawLabel(choice.ImplicitTLS())))
-	return a.rawSession(ctx, t, choice.ImplicitTLS(), true)
+	cfg, err := config.Load(path, explicit)
+	if err != nil {
+		return usageError(fmt.Errorf("config: %w", err), "fix the config file, or point --config at another one")
+	}
+	a.cfg = cfg
+	if cfg.Path != "" {
+		a.logf("config: loaded %s", cfg.Path)
+	}
+	return nil
 }
 
-// status prints the one-line summary shown before handing off.
-func (a *app) status(mark, msg string) {
-	if a.opts.dryRun {
+// printDetection writes the --detect-only report, including the client
+// command portal would run.
+func (a *app) printDetection(rep *detect.Report, extra []string) error {
+	choice, ok := rep.Best()
+	if !ok && len(rep.Candidates) == 0 {
+		choice, ok = rawChoice(rep.TLS), true
+	}
+	var argv []string
+	client := ""
+	if ok {
+		cmd, err := a.resolver.Resolve(a.request(rep.Target, choice, extra))
+		var missing *clients.MissingError
+		switch {
+		case errors.As(err, &missing):
+			argv = cmd.Argv()
+			client = fmt.Sprintf("%s  %s", cmd, a.out.Yellow("(not installed: "+missing.Hint+")"))
+		case err == nil:
+			argv = cmd.Argv()
+			client = cmd.String()
+		}
+	}
+	if a.opts.jsonOut {
+		return writeJSON(a.streams.Out, rep, argv)
+	}
+	printReport(a.streams.Out, a.out, rep, client)
+	return nil
+}
+
+// detect runs service detection with timeouts from the flags and config,
+// logging each step to stderr in verbose mode.
+func (a *app) detect(ctx context.Context, t target.Target) (*detect.Report, error) {
+	opts := detect.Options{
+		Timeout:       a.opts.timeout,
+		BannerTimeout: a.cfg.BannerTimeout,
+		TLSTimeout:    a.cfg.TLSTimeout,
+		ProbeTimeout:  a.cfg.ProbeTimeout,
+	}
+	if !a.timeoutSet && a.cfg.Timeout > 0 {
+		opts.Timeout = a.cfg.Timeout
+	}
+	if a.opts.verbose {
+		opts.Logf = a.logf
+	}
+	rep, err := detect.Detect(ctx, t, opts)
+	var ce *detect.ConnError
+	if errors.As(err, &ce) {
+		return nil, connectionError(t, ce.Err)
+	}
+	return rep, err
+}
+
+// logf writes a verbose log line to stderr with the time since start.
+func (a *app) logf(format string, args ...any) {
+	if !a.opts.verbose {
 		return
 	}
-	switch mark {
-	case "✓":
-		mark = a.err.Green(mark)
-	case "?":
-		mark = a.err.Yellow(mark)
-	case "✗":
-		mark = a.err.Red(mark)
-	}
-	fmt.Fprintf(a.streams.Err, "%s %s\n", mark, msg)
-}
-
-// serviceAliases maps alternative --service spellings to services.
-var serviceAliases = map[string]detect.Service{
-	"postgres": detect.PostgreSQL,
-	"pg":       detect.PostgreSQL,
-	"mariadb":  detect.MySQL,
-	"mongo":    detect.MongoDB,
-	"raw":      detect.Unknown,
-	"tcp":      detect.Unknown,
-	"tls":      detect.Unknown,
+	ms := time.Since(a.start).Milliseconds()
+	fmt.Fprintf(a.streams.Err, "%s %s\n", a.err.Dim(fmt.Sprintf("%5dms", ms)), fmt.Sprintf(format, args...))
 }
 
 // serviceNames lists the values --service accepts, for help and errors.
@@ -273,96 +353,25 @@ func serviceNames() string {
 	return strings.Join(append(names, "raw", "tls"), ", ")
 }
 
-// parseService turns a --service value into a result to hand off to.
+// parseService turns a --service value (or a config override) into a
+// result to hand off to. "raw" and "tls" select portal's raw session.
 func parseService(name string) (detect.Result, error) {
-	name = strings.ToLower(strings.TrimSpace(name))
-	s, ok := serviceAliases[name]
-	if !ok {
-		s = detect.Service(name)
-		if !s.Known() {
+	r := detect.Result{Confidence: detect.Confirmed}
+	switch n := strings.ToLower(strings.TrimSpace(name)); n {
+	case "raw", "tcp":
+		r.Service = detect.Unknown
+	case "tls":
+		r.Service = detect.Unknown
+		r.TLS = &detect.TLSInfo{}
+	default:
+		s, ok := detect.ParseService(n)
+		if !ok {
 			return detect.Result{}, usageError(fmt.Errorf("unknown service %q", name), "use one of: "+serviceNames())
 		}
-	}
-	r := detect.Result{Service: s, Confidence: detect.Confirmed, Evidence: "set with --service"}
-	if name == "tls" || s == detect.HTTPS {
-		r.TLS = &detect.TLSInfo{}
-	}
-	return r, nil
-}
-
-// detect runs service detection, logging each step to stderr in verbose
-// mode.
-func (a *app) detect(ctx context.Context, t target.Target) (*detect.Report, error) {
-	opts := detect.Options{Timeout: a.opts.timeout}
-	if a.opts.verbose {
-		start := time.Now()
-		opts.Logf = func(format string, args ...any) {
-			ms := time.Since(start).Milliseconds()
-			fmt.Fprintf(a.streams.Err, "%s %s\n", a.err.Dim(fmt.Sprintf("%5dms", ms)), fmt.Sprintf(format, args...))
+		r.Service = s
+		if s == detect.HTTPS {
+			r.TLS = &detect.TLSInfo{}
 		}
 	}
-	rep, err := detect.Detect(ctx, t, opts)
-	var ce *detect.ConnError
-	if errors.As(err, &ce) {
-		return nil, connectionError(t, ce.Err)
-	}
-	return rep, err
-}
-
-func (a *app) rawSession(ctx context.Context, t target.Target, useTLS, crlf bool) error {
-	kind := "TCP"
-	if useTLS {
-		kind = "TLS"
-	}
-	if a.opts.dryRun {
-		fmt.Fprintf(a.streams.Out, "(built-in raw %s session to %s)\n", kind, t)
-		return nil
-	}
-	fmt.Fprintf(a.streams.Err, "%s\n", a.err.Dim(fmt.Sprintf("Connected to %s (raw %s). Type to send; Ctrl+C to quit.", t, kind)))
-	serverName := ""
-	if !t.IsIP() {
-		serverName = t.Host
-	}
-	err := rawsession.Run(ctx, t.Addr(), rawsession.Options{
-		TLS:        useTLS,
-		ServerName: serverName,
-		CRLF:       crlf,
-		Stdin:      a.streams.In,
-		Stdout:     a.streams.Out,
-		Stderr:     a.streams.Err,
-	})
-	if err != nil {
-		return connectionError(t, err)
-	}
-	return nil
-}
-
-// connectionError turns a dial error into an Error with a hint that fits
-// the failure.
-func connectionError(t target.Target, err error) *Error {
-	var dnsErr *net.DNSError
-	var netErr net.Error
-	hint := "check the host and port, and that no firewall is blocking the connection"
-	switch {
-	case errors.As(err, &dnsErr) && dnsErr.IsNotFound:
-		hint = fmt.Sprintf("check the spelling of %q, or use an IP address", t.Host)
-	case errors.As(err, &dnsErr):
-		hint = fmt.Sprintf("could not resolve %q; check the name and your network or DNS settings", t.Host)
-	case errors.As(err, &netErr) && netErr.Timeout(), errors.Is(err, context.DeadlineExceeded):
-		hint = "the host may be down or a firewall may be dropping packets; try a longer --timeout, e.g. --timeout 30s"
-	case isConnRefused(err):
-		hint = fmt.Sprintf("nothing is listening on port %d; check that the service is running and the port is right", t.Port)
-		return &Error{Code: ExitConnection, Err: fmt.Errorf("cannot connect to %s: connection refused", t), Hint: hint}
-	}
-	return &Error{Code: ExitConnection, Err: fmt.Errorf("cannot connect to %s: %w", t, unwrapOp(err)), Hint: hint}
-}
-
-// unwrapOp strips the "dial tcp 1.2.3.4:5:" prefix of *net.OpError, since
-// portal already names the target.
-func unwrapOp(err error) error {
-	var op *net.OpError
-	if errors.As(err, &op) && op.Err != nil {
-		return op.Err
-	}
-	return err
+	return r, nil
 }

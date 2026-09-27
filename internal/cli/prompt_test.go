@@ -28,7 +28,7 @@ func TestChooserWithoutTTY(t *testing.T) {
 
 func TestChooserPicksRaw(t *testing.T) {
 	s := ambiguousServer(t)
-	code, stdout, stderr := runCLIWith(t, true, "7\n3\n", "-n", s.Target.String())
+	code, stdout, stderr := runCLIWith(t, cliEnv{tty: true}, "7\n3\n", "-n", s.Target.String())
 	if code != ExitOK {
 		t.Fatalf("exit code = %d (stderr: %s)", code, stderr)
 	}
@@ -44,7 +44,7 @@ func TestChooserPicksRaw(t *testing.T) {
 
 func TestChooserQuit(t *testing.T) {
 	s := ambiguousServer(t)
-	code, _, stderr := runCLIWith(t, true, "q\n", "-n", s.Target.String())
+	code, _, stderr := runCLIWith(t, cliEnv{tty: true}, "q\n", "-n", s.Target.String())
 	if code != ExitUsage || !strings.Contains(stderr, "aborted") {
 		t.Errorf("exit code = %d, stderr = %q; want %d and 'aborted'", code, stderr, ExitUsage)
 	}
@@ -52,7 +52,7 @@ func TestChooserQuit(t *testing.T) {
 
 func TestChooserEOF(t *testing.T) {
 	s := ambiguousServer(t)
-	code, _, stderr := runCLIWith(t, true, "", "-n", s.Target.String())
+	code, _, stderr := runCLIWith(t, cliEnv{tty: true}, "", "-n", s.Target.String())
 	if code != ExitUsage || !strings.Contains(stderr, "no choice made") {
 		t.Errorf("exit code = %d, stderr = %q", code, stderr)
 	}

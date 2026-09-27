@@ -5,25 +5,47 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/modermatt44/portal/internal/clients"
+	"github.com/modermatt44/portal/internal/config"
 	"github.com/modermatt44/portal/internal/fakeserver"
 	"github.com/modermatt44/portal/internal/term"
 )
 
-// runCLI executes portal with args and returns the exit code and output.
+// runCLI executes portal with args, as if every client program were
+// installed, and returns the exit code and output.
 func runCLI(t *testing.T, stdin string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
-	return runCLIWith(t, false, stdin, args...)
+	return runCLIWith(t, cliEnv{}, stdin, args...)
 }
 
-// runCLIWith is like runCLI; tty makes stdin count as an interactive terminal.
-func runCLIWith(t *testing.T, tty bool, stdin string, args ...string) (code int, stdout, stderr string) {
+// cliEnv describes the environment a test runs portal in.
+type cliEnv struct {
+	// tty makes stdin count as an interactive terminal.
+	tty bool
+	// installed lists the client programs on PATH; nil means all of them.
+	installed []string
+}
+
+// runCLIWith is like runCLI with a custom environment. The user's real
+// config file is never read.
+func runCLIWith(t *testing.T, env cliEnv, stdin string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
+	t.Setenv(config.EnvPath, filepath.Join(t.TempDir(), "no-config.toml"))
+	lookPath := func(file string) (string, error) {
+		if env.installed == nil || slices.Contains(env.installed, file) {
+			return "/usr/bin/" + file, nil
+		}
+		return "", exec.ErrNotFound
+	}
 	var out, errOut bytes.Buffer
-	streams := Streams{In: strings.NewReader(stdin), Out: &out, Err: &errOut, InTTY: tty}
-	cmd := NewRootCommand("test", streams)
+	streams := Streams{In: strings.NewReader(stdin), Out: &out, Err: &errOut, InTTY: env.tty}
+	cmd := newRootCommand("test", streams, clients.Resolver{LookPath: lookPath, GOOS: "linux"})
 	cmd.SetArgs(args)
 	err := cmd.ExecuteContext(context.Background())
 	code = report(&errOut, term.Style{}, err)
