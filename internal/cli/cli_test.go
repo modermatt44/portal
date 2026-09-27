@@ -15,8 +15,14 @@ import (
 // runCLI executes portal with args and returns the exit code and output.
 func runCLI(t *testing.T, stdin string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
+	return runCLIWith(t, false, stdin, args...)
+}
+
+// runCLIWith is like runCLI; tty makes stdin count as an interactive terminal.
+func runCLIWith(t *testing.T, tty bool, stdin string, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
 	var out, errOut bytes.Buffer
-	streams := Streams{In: strings.NewReader(stdin), Out: &out, Err: &errOut}
+	streams := Streams{In: strings.NewReader(stdin), Out: &out, Err: &errOut, InTTY: tty}
 	cmd := NewRootCommand("test", streams)
 	cmd.SetArgs(args)
 	err := cmd.ExecuteContext(context.Background())

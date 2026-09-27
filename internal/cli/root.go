@@ -53,6 +53,7 @@ type options struct {
 	verbose    bool
 	dryRun     bool
 	timeout    time.Duration
+	service    string
 }
 
 type app struct {
@@ -146,6 +147,8 @@ func NewRootCommand(version string, streams Streams) *cobra.Command {
 		"show which probes ran and what they saw, on stderr\n(e.g. portal -v server:22)")
 	f.BoolVarP(&a.opts.dryRun, "dry-run", "n", false,
 		"print the client command instead of running it\n(e.g. portal -n db:5432 -- -U admin)")
+	f.StringVarP(&a.opts.service, "service", "s", "",
+		"skip detection and treat the port as this service\n(one of: "+serviceNames()+")\n(e.g. portal -s redis cache.local:6380)")
 
 	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
 		hint := "run 'portal --help' for usage"
@@ -187,6 +190,17 @@ func (a *app) run(ctx context.Context, targetArgs, extra []string) error {
 		return usageError(fmt.Errorf("invalid --timeout %v", a.opts.timeout), "use a positive duration, e.g. --timeout 5s")
 	}
 
+	if a.opts.service != "" {
+		if a.opts.detectOnly {
+			return usageError(errors.New("--service skips detection, so it can't be combined with --detect-only"), "drop one of the two flags")
+		}
+		choice, err := parseService(a.opts.service)
+		if err != nil {
+			return err
+		}
+		return a.handoff(ctx, t, choice, "set with --service", extra)
+	}
+
 	rep, err := a.detect(ctx, t)
 	if err != nil {
 		return err
@@ -199,13 +213,81 @@ func (a *app) run(ctx context.Context, targetArgs, extra []string) error {
 		return nil
 	}
 
-	best, ok := rep.Best()
-	if !ok {
-		fmt.Fprintf(a.streams.Err, "%s No known service detected on %s → opening a raw session\n", a.err.Yellow("?"), t)
-		return a.rawSession(ctx, t, rep.TLS != nil, false)
+	choice, ok := rep.Best()
+	switch {
+	case ok:
+	case len(rep.Candidates) > 0:
+		if choice, err = a.choose(rep); err != nil {
+			return err
+		}
+	default:
+		choice = rawChoice(rep.TLS)
 	}
-	fmt.Fprintf(a.streams.Err, "%s %s detected on %s → opening a raw session\n", a.err.Green("✓"), best.Label(), t)
-	return a.rawSession(ctx, t, best.ImplicitTLS(), true)
+	return a.handoff(ctx, t, choice, "detected", extra)
+}
+
+// handoff connects the user to the chosen service. how says how the
+// service was determined, e.g. "detected".
+func (a *app) handoff(ctx context.Context, t target.Target, choice detect.Result, how string, extra []string) error {
+	if choice.Service == detect.Unknown {
+		a.status("?", fmt.Sprintf("No known service on %s → opening a %s", t, rawLabel(choice.TLS != nil)))
+		return a.rawSession(ctx, t, choice.TLS != nil, false)
+	}
+	a.status("✓", fmt.Sprintf("%s %s on %s → opening a %s", choice.Label(), how, t, rawLabel(choice.ImplicitTLS())))
+	return a.rawSession(ctx, t, choice.ImplicitTLS(), true)
+}
+
+// status prints the one-line summary shown before handing off.
+func (a *app) status(mark, msg string) {
+	if a.opts.dryRun {
+		return
+	}
+	switch mark {
+	case "✓":
+		mark = a.err.Green(mark)
+	case "?":
+		mark = a.err.Yellow(mark)
+	case "✗":
+		mark = a.err.Red(mark)
+	}
+	fmt.Fprintf(a.streams.Err, "%s %s\n", mark, msg)
+}
+
+// serviceAliases maps alternative --service spellings to services.
+var serviceAliases = map[string]detect.Service{
+	"postgres": detect.PostgreSQL,
+	"pg":       detect.PostgreSQL,
+	"mariadb":  detect.MySQL,
+	"mongo":    detect.MongoDB,
+	"raw":      detect.Unknown,
+	"tcp":      detect.Unknown,
+	"tls":      detect.Unknown,
+}
+
+// serviceNames lists the values --service accepts, for help and errors.
+func serviceNames() string {
+	var names []string
+	for _, s := range detect.Services() {
+		names = append(names, string(s))
+	}
+	return strings.Join(append(names, "raw", "tls"), ", ")
+}
+
+// parseService turns a --service value into a result to hand off to.
+func parseService(name string) (detect.Result, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	s, ok := serviceAliases[name]
+	if !ok {
+		s = detect.Service(name)
+		if !s.Known() {
+			return detect.Result{}, usageError(fmt.Errorf("unknown service %q", name), "use one of: "+serviceNames())
+		}
+	}
+	r := detect.Result{Service: s, Confidence: detect.Confirmed, Evidence: "set with --service"}
+	if name == "tls" || s == detect.HTTPS {
+		r.TLS = &detect.TLSInfo{}
+	}
+	return r, nil
 }
 
 // detect runs service detection, logging each step to stderr in verbose
