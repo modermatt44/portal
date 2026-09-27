@@ -41,6 +41,7 @@ type SyntaxError struct {
 	Msg  string
 }
 
+// Error implements the error interface.
 func (e *SyntaxError) Error() string { return fmt.Sprintf("line %d: %s", e.Line, e.Msg) }
 
 // parseTOML reads the document into tables. Keys before the first header

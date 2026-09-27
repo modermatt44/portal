@@ -140,11 +140,12 @@ func newRootCommand(version string, streams Streams, resolver clients.Resolver) 
 		configHelp = "~/.config/portal/config.toml"
 	}
 	cmd := &cobra.Command{
-		Use:     "portal <host:port | host port> [-- client args...]",
-		Short:   "Detect the service on a TCP port and open the right client",
-		Long:    fmt.Sprintf(longHelp, configHelp),
-		Example: examples,
-		Version: version,
+		Use:                   "portal [flags] <host:port | host port> [-- client args...]",
+		DisableFlagsInUseLine: true,
+		Short:                 "Detect the service on a TCP port and open the right client",
+		Long:                  fmt.Sprintf(longHelp, configHelp),
+		Example:               examples,
+		Version:               version,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return usageError(errors.New("missing target"), "try: portal db.local:5432, or see portal --help")

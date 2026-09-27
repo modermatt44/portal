@@ -105,8 +105,10 @@ type ConnError struct {
 	Err    error
 }
 
+// Error implements the error interface.
 func (e *ConnError) Error() string { return fmt.Sprintf("cannot connect to %s: %v", e.Target, e.Err) }
 
+// Unwrap returns the underlying network error.
 func (e *ConnError) Unwrap() error { return e.Err }
 
 // dialFunc opens a connection to the target, plain or through TLS.
@@ -154,9 +156,9 @@ func Detect(ctx context.Context, t target.Target, opts Options) (*Report, error)
 	hint, hasHint := portHints[t.Port]
 	if len(results) == 0 && hasHint {
 		r := Result{
-			Service:    hint.service,
+			Service:    hint,
 			Confidence: PortHint,
-			Evidence:   fmt.Sprintf("port %d is usually %s (not verified)", t.Port, hint.service.DisplayName()),
+			Evidence:   fmt.Sprintf("port %d is usually %s (not verified)", t.Port, hint.DisplayName()),
 		}
 		if rep.TLS != nil {
 			r.TLS = rep.TLS
@@ -167,7 +169,7 @@ func Detect(ctx context.Context, t target.Target, opts Options) (*Report, error)
 		d.logf("no probe matched; using port hint: %s", r.Service)
 		results = append(results, r)
 	}
-	sortResults(results, hint.service)
+	sortResults(results, hint)
 	rep.Candidates = results
 	rep.Elapsed = time.Since(start)
 	return rep, nil

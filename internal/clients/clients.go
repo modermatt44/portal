@@ -85,6 +85,7 @@ type MissingError struct {
 	Hint string
 }
 
+// Error names the missing program and the alternatives that were tried.
 func (e *MissingError) Error() string {
 	msg := fmt.Sprintf("%s is not installed", e.Tried[0])
 	if len(e.Tried) > 1 {
@@ -254,4 +255,5 @@ type ExitError struct {
 	Code int
 }
 
+// Error implements the error interface.
 func (e *ExitError) Error() string { return "client exited with status " + strconv.Itoa(e.Code) }
