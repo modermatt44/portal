@@ -40,6 +40,7 @@ func TestIMAPMatchBanner(t *testing.T) {
 }
 
 func TestDetectIMAP(t *testing.T) {
+	t.Parallel()
 	s := fakeserver.Start(t, fakeserver.Lines("* OK ready\r\n", func(line string) (string, bool) {
 		tag, cmd, _ := strings.Cut(line, " ")
 		switch strings.ToUpper(cmd) {

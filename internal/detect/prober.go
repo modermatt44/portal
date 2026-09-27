@@ -30,7 +30,8 @@ type BannerProber interface {
 
 // Confirmer is implemented by a BannerProber that can verify or enrich a
 // banner match by talking to the server, e.g. SMTP sending EHLO to learn
-// whether STARTTLS is offered.
+// whether STARTTLS is offered. It is only called for matches that are not
+// already Confirmed.
 type Confirmer interface {
 	// Confirm is called with a connection whose greeting (banner) has
 	// already been read. It returns the improved result, or nil to keep the

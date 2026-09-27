@@ -37,6 +37,7 @@ func TestPOP3MatchBanner(t *testing.T) {
 }
 
 func TestDetectPOP3(t *testing.T) {
+	t.Parallel()
 	s := fakeserver.Start(t, fakeserver.Lines("+OK ready.\r\n", func(line string) (string, bool) {
 		switch strings.ToUpper(line) {
 		case "CAPA":

@@ -235,7 +235,7 @@ func (d *detector) bannerPhase(ctx context.Context, dial dialFunc, conn net.Conn
 	}()
 	for i, bp := range owners {
 		c, ok := bp.(Confirmer)
-		if !ok {
+		if !ok || results[i].Confidence == Confirmed {
 			continue
 		}
 		cconn, cbanner := fresh, banner

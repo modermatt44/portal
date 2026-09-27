@@ -57,6 +57,7 @@ func smtpHandler(banner, ehlo string) func(string) (string, bool) {
 }
 
 func TestDetectSMTP(t *testing.T) {
+	t.Parallel()
 	banner := "220 mail.test ESMTP Postfix\r\n"
 	s := fakeserver.Start(t, fakeserver.Lines(banner, smtpHandler(banner,
 		"250-mail.test\r\n250-PIPELINING\r\n250-SIZE 10240000\r\n250 8BITMIME\r\n")))
@@ -76,6 +77,7 @@ func TestDetectSMTP(t *testing.T) {
 // TestDetectBare220SMTP checks that a greeting that could be SMTP or FTP is
 // resolved by EHLO.
 func TestDetectBare220SMTP(t *testing.T) {
+	t.Parallel()
 	banner := "220 Service ready\r\n"
 	s := fakeserver.Start(t, fakeserver.Lines(banner, smtpHandler(banner, "250 hello\r\n")))
 	rep := detectFake(t, s)

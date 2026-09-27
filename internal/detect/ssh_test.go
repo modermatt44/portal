@@ -38,6 +38,7 @@ func TestSSHMatchBanner(t *testing.T) {
 }
 
 func TestDetectSSH(t *testing.T) {
+	t.Parallel()
 	s := fakeserver.Start(t, fakeserver.Lines("SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5\r\n", nil))
 	rep := detectFake(t, s)
 	best := wantBest(t, rep, SSH, Confirmed)

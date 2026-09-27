@@ -2,6 +2,7 @@ package detect
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strings"
@@ -98,5 +99,22 @@ func (p smtpProber) Confirm(ctx context.Context, conn net.Conn, t target.Target,
 // smtpStartTLS upgrades the session with STARTTLS and records the TLS
 // details in r.
 func smtpStartTLS(ctx context.Context, lc *lineConn, t target.Target, r *Result) error {
+	if err := lc.send("STARTTLS"); err != nil {
+		return err
+	}
+	code, _, err := lc.readReply()
+	if err != nil {
+		return err
+	}
+	if code != 220 {
+		return fmt.Errorf("STARTTLS answered %d", code)
+	}
+	tc := tls.Client(lc.conn, clientTLSConfig(t, nil))
+	if err := tc.HandshakeContext(ctx); err != nil {
+		return err
+	}
+	r.TLS = newTLSInfo(tc.ConnectionState(), t)
+	r.StartTLS = true
+	*lc = *newLineConn(tc)
 	return nil
 }

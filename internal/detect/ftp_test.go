@@ -61,6 +61,7 @@ func ftpHandler(feat bool) func(string) (string, bool) {
 }
 
 func TestDetectFTP(t *testing.T) {
+	t.Parallel()
 	s := fakeserver.Start(t, fakeserver.Lines("220 (vsFTPd 3.0.5)\r\n", ftpHandler(true)))
 	rep := detectFake(t, s)
 	best := wantBest(t, rep, FTP, Confirmed)
@@ -75,6 +76,7 @@ func TestDetectFTP(t *testing.T) {
 // TestDetectBare220FTP checks that a greeting that could be SMTP or FTP is
 // resolved by SYST when FEAT is not supported.
 func TestDetectBare220FTP(t *testing.T) {
+	t.Parallel()
 	s := fakeserver.Start(t, fakeserver.Lines("220 Service ready\r\n", ftpHandler(false)))
 	rep := detectFake(t, s)
 	best := wantBest(t, rep, FTP, Confirmed)

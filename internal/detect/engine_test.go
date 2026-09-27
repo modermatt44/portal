@@ -16,9 +16,9 @@ import (
 func testOptions(t *testing.T) Options {
 	return Options{
 		Timeout:       5 * time.Second,
-		BannerTimeout: 300 * time.Millisecond,
-		TLSTimeout:    time.Second,
-		ProbeTimeout:  time.Second,
+		BannerTimeout: 200 * time.Millisecond,
+		TLSTimeout:    500 * time.Millisecond,
+		ProbeTimeout:  500 * time.Millisecond,
 		Logf:          t.Logf,
 	}
 }
@@ -47,6 +47,7 @@ func wantBest(t *testing.T, rep *Report, service Service, conf Confidence) Resul
 }
 
 func TestDetectConnectionRefused(t *testing.T) {
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +63,7 @@ func TestDetectConnectionRefused(t *testing.T) {
 }
 
 func TestDetectUnknownBanner(t *testing.T) {
+	t.Parallel()
 	s := fakeserver.Start(t, fakeserver.Lines("RFB 003.008\n", nil))
 	rep := detectFake(t, s)
 	if len(rep.Candidates) != 0 {
@@ -73,6 +75,7 @@ func TestDetectUnknownBanner(t *testing.T) {
 }
 
 func TestDetectSilent(t *testing.T) {
+	t.Parallel()
 	s := fakeserver.Start(t, fakeserver.Silent())
 	rep := detectFake(t, s)
 	if len(rep.Candidates) != 0 {
@@ -166,4 +169,16 @@ func TestVersionToken(t *testing.T) {
 			t.Errorf("versionToken(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+// dialFake connects to s with a deadline, for calling a prober directly.
+func dialFake(t *testing.T, s *fakeserver.Server) net.Conn {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", s.Target.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	t.Cleanup(func() { conn.Close() })
+	return conn
 }
