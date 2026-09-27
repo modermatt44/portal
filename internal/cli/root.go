@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/modermatt44/portal/internal/detect"
 	"github.com/modermatt44/portal/internal/rawsession"
 	"github.com/modermatt44/portal/internal/target"
 	"github.com/modermatt44/portal/internal/term"
@@ -186,25 +187,44 @@ func (a *app) run(ctx context.Context, targetArgs, extra []string) error {
 		return usageError(fmt.Errorf("invalid --timeout %v", a.opts.timeout), "use a positive duration, e.g. --timeout 5s")
 	}
 
-	if err := a.checkReachable(ctx, t); err != nil {
+	rep, err := a.detect(ctx, t)
+	if err != nil {
 		return err
 	}
 	if a.opts.detectOnly {
-		fmt.Fprintf(a.streams.Out, "No known service detected on %s\n", t)
+		if a.opts.jsonOut {
+			return writeJSON(a.streams.Out, rep, nil)
+		}
+		printReport(a.streams.Out, a.out, rep, "")
 		return nil
 	}
-	return a.rawSession(ctx, t, false, false)
+
+	best, ok := rep.Best()
+	if !ok {
+		fmt.Fprintf(a.streams.Err, "%s No known service detected on %s → opening a raw session\n", a.err.Yellow("?"), t)
+		return a.rawSession(ctx, t, rep.TLS != nil, false)
+	}
+	fmt.Fprintf(a.streams.Err, "%s %s detected on %s → opening a raw session\n", a.err.Green("✓"), best.Label(), t)
+	return a.rawSession(ctx, t, best.ImplicitTLS(), true)
 }
 
-// checkReachable dials t once so connection problems are reported with exit
-// code 1 before anything else happens.
-func (a *app) checkReachable(ctx context.Context, t target.Target) error {
-	d := net.Dialer{Timeout: a.opts.timeout}
-	conn, err := d.DialContext(ctx, "tcp", t.Addr())
-	if err != nil {
-		return connectionError(t, err)
+// detect runs service detection, logging each step to stderr in verbose
+// mode.
+func (a *app) detect(ctx context.Context, t target.Target) (*detect.Report, error) {
+	opts := detect.Options{Timeout: a.opts.timeout}
+	if a.opts.verbose {
+		start := time.Now()
+		opts.Logf = func(format string, args ...any) {
+			ms := time.Since(start).Milliseconds()
+			fmt.Fprintf(a.streams.Err, "%s %s\n", a.err.Dim(fmt.Sprintf("%5dms", ms)), fmt.Sprintf(format, args...))
+		}
 	}
-	return conn.Close()
+	rep, err := detect.Detect(ctx, t, opts)
+	var ce *detect.ConnError
+	if errors.As(err, &ce) {
+		return nil, connectionError(t, ce.Err)
+	}
+	return rep, err
 }
 
 func (a *app) rawSession(ctx context.Context, t target.Target, useTLS, crlf bool) error {

@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"strings"
 	"testing"
 
+	"github.com/modermatt44/portal/internal/fakeserver"
 	"github.com/modermatt44/portal/internal/term"
 )
 
@@ -87,5 +89,51 @@ func TestSplitArgs(t *testing.T) {
 		if strings.Join(gotT, " ") != strings.Join(tt.wantTarget, " ") || strings.Join(gotE, " ") != strings.Join(tt.wantPassthr, " ") {
 			t.Errorf("splitArgs(%q, %d) = %q, %q; want %q, %q", tt.args, tt.dash, gotT, gotE, tt.wantTarget, tt.wantPassthr)
 		}
+	}
+}
+
+func TestDetectOnlyText(t *testing.T) {
+	s := fakeserver.Start(t, fakeserver.Lines("SSH-2.0-OpenSSH_9.6p1 Ubuntu-3\r\n", nil))
+	code, stdout, stderr := runCLI(t, "", "-d", "--timeout", "3s", s.Target.String())
+	if code != ExitOK {
+		t.Fatalf("exit code = %d (stderr: %s)", code, stderr)
+	}
+	for _, want := range []string{"✓ SSH (OpenSSH 9.6p1) on " + s.Target.String(), "confirmed", "protocol"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout = %q, want it to contain %q", stdout, want)
+		}
+	}
+	if strings.Contains(stdout, "\x1b[") {
+		t.Error("stdout contains color codes although color is off")
+	}
+}
+
+func TestDetectOnlyJSON(t *testing.T) {
+	s := fakeserver.Start(t, fakeserver.Lines("SSH-2.0-OpenSSH_9.6p1\r\n", nil))
+	code, stdout, stderr := runCLI(t, "", "--json", s.Target.String())
+	if code != ExitOK {
+		t.Fatalf("exit code = %d (stderr: %s)", code, stderr)
+	}
+	var got struct {
+		Service    string `json:"service"`
+		Port       int    `json:"port"`
+		Ambiguous  bool   `json:"ambiguous"`
+		Candidates []struct {
+			Confidence string `json:"confidence"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("invalid JSON %q: %v", stdout, err)
+	}
+	if got.Service != "ssh" || got.Port != s.Target.Port || got.Ambiguous || len(got.Candidates) != 1 || got.Candidates[0].Confidence != "confirmed" {
+		t.Errorf("JSON = %+v", got)
+	}
+}
+
+func TestVerboseLogsToStderr(t *testing.T) {
+	s := fakeserver.Start(t, fakeserver.Lines("SSH-2.0-OpenSSH_9.6p1\r\n", nil))
+	_, stdout, stderr := runCLI(t, "", "-d", "-v", s.Target.String())
+	if !strings.Contains(stderr, "banner") || strings.Contains(stdout, "banner \"SSH") {
+		t.Errorf("verbose output should go to stderr only; stdout=%q stderr=%q", stdout, stderr)
 	}
 }
