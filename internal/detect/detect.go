@@ -18,6 +18,7 @@ package detect
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -190,4 +191,23 @@ type TLSInfo struct {
 	Verified bool `json:"verified"`
 	// VerifyError explains why verification failed.
 	VerifyError string `json:"verify_error,omitempty"`
+}
+
+// serviceAliases are alternative names accepted by ParseService.
+var serviceAliases = map[string]Service{
+	"postgres": PostgreSQL,
+	"pg":       PostgreSQL,
+	"mariadb":  MySQL,
+	"mongo":    MongoDB,
+}
+
+// ParseService returns the service with the given name or common alias
+// (e.g. "postgres", "mariadb", "mongo"), ignoring case.
+func ParseService(name string) (Service, bool) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if s, ok := serviceAliases[name]; ok {
+		return s, true
+	}
+	s := Service(name)
+	return s, s.Known()
 }
